@@ -1,0 +1,11 @@
+numpy
+stim
+matplotlib
+ncon
+scipy
+galois
+ldpc
+
+[dev]
+pytest>=7.0
+pytest-cov>=4.0

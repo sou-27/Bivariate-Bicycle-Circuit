@@ -3,29 +3,43 @@ import stim
 import galois
 from typing import Literal
 from itertools import chain
+from pysat.examples.rc2 import RC2
+from pysat.formula import WCNF
 
 type check_matrix = tuple[tuple[Literal[0,1], int]]
 
 GF2 = galois.GF(2)
 
-def term(basis, vec):
-            """
-            Returns a string representing pauli operator on given support. Eg. for basis = "X"
-            and vec = [0,1,1,0,0], returns "X1*X2"
 
-            Parameters:
-            basis (str) : Pauli operator to be used
-            vec (List of integers) : Support of pauli operator
-
-            Returns:
-            String representing given pauli operator.
-            """
-            return "*".join(f"{basis}{q}" for q in range(len(vec)) if vec[q]==1)
 
 def CNOT_pairs(controls, targets):
+    """
+    Pairs up controls and targets into single interleaved list.
+    Eg. controls = [0,1] targets = ['a', 'b'] ---> returns [0,'a',1,'b']
+    Used to create control-target structure for CNOT gates in stim.circuit
+
+    Parameters:
+    controls (list) : List of controls for CNOT gate
+    targets(list) :  List of targets for CNOT gate
+
+    Returns: [List] List consisting of controls and targets in interleaved form.
+    """
     return list(chain.from_iterable(zip(controls,targets)))
 
 def create_CNOT_string(register, controls, targets):
+     """
+     Takes in a register ("L" or "R") and controls and targets and returns approprate control-target
+     list for use in CNOT gate. If controls(or targets) is given as a matrix, determines appropriate position of 
+     data qubits by looking for 1s in the matrix. The register determines specific index of data qubit
+     in circuit.
+
+     Parameters:
+     register(str) : "L" or "R"
+     controls(List or np.ndarray) : Controls for CNOT gate. If np.ndarray, qubit indices are calculated.
+     targets(List or np.ndarray) : Targets for CNOT gate. If np.ndarray, qubit indices are calculated.
+
+     Returns: [List] List consisting of controls and targets in interleaved form.
+     """
      N = len(controls) 
      shift = 0
      if register == "R":
@@ -49,7 +63,32 @@ def create_CNOT_string(register, controls, targets):
 
     
 class BivBic:
-    def __init__(self, l :int, m :int, A_vars :check_matrix, B_vars :check_matrix, p:float, rounds :int):
+    """
+    Class defining a Bivariate Bicycle code given input parameters.
+    
+    Attributes:
+    -----------
+    l(int) : Dimension of matrices. 
+    m(int) : Dimension of matrices
+    A_vars(List[List[int,int]]) : Input trinomial, in format [0 for x;1 for y, power]. Eg. A_vars = [[0,1],[1,1],1,2] => A = x + y + y^2
+    B_Vars(List[List[int,int]]) : See above
+    p(float) : Fault probability in circuit. Assumed depolarizing noise.
+    rounds(int) : Number of rounds of syndrome measurement.
+    code_capacity(bool) : True for code capacity noise. Else we use circuit level noise.
+    A(np.ndarray) = A_1 + A_2 + A_3
+    B(np.ndarray) = B_1 + B_2 + B_3
+    HX(np.ndarray) : X-stabilizers. Defined HX = [A|B]
+    HZ(np.ndarray) : Z-stabilizers. Defined HZ = [B.T|A.T]
+    n(int) : Number of data qubits.
+    k(int) : Number of encoded logical qubits.
+    kernels(List[np.ndarray]) : Each array is a vector in the space ker(A) intercept ker(B). Usefeul for calculating logical observables.
+    circuit(stim.circuit) : BB circuit generated from input parameters.
+
+    calculate_distance() : Calculates code distance for input distance under code capacity conditions. Uses a SAT solver. Fairly 
+                            costly computation so only computed on request.
+
+    """
+    def __init__(self,*, l :int, m :int, A_vars :check_matrix, B_vars :check_matrix, p:float, rounds :int, code_capacity = False):
         self.l = l
         self.m = m
         self.rounds = rounds
@@ -60,7 +99,7 @@ class BivBic:
          
 
         p_l = [(i+1)%l for i in range(l)]
-        p_m = [(i+1)%l for i in range(m)]
+        p_m = [(i+1)%m for i in range(m)]
 
         I_l = GF2.Identity(l)
         I_m = GF2.Identity(m)
@@ -110,48 +149,58 @@ class BivBic:
 
         self.k = 2 * len(kernels)
 
-        #self.circuit = self.generate_noiseless_circuit()
+        self.circuit = self.generate_noisy_circuit(code_capacity)
+
+    def calculate_distance(self):
+        """
+        Calculates code distance of BB circuit under code capacity conditions using SAT optimization.
+
+        Returns : distance(int) - Calculated code distance.
+        """
+        code_capacity_circuit = self.generate_noisy_circuit(True)
+        wdimacs_string = code_capacity_circuit.shortest_error_sat_problem(format="WDIMACS")
+
+        wcnf = WCNF(from_string=wdimacs_string)
+
+        with RC2(wcnf) as rc2:
+            solution = rc2.compute()  # Finds the optimal assignment of variables
+            distance = rc2.cost 
+        return distance
 
     def get_logical_observables(self):
+        """
+        Computes pauli operators corresponding to logical Z-observables.
+
+        Returns: List[List[int]] - List containing observables. Each observable is a list of indices where a pauli-Z must be applied.
+        """
         kernels = self.kernels
         n = self.n
-        triv = GF2.Zeros((1,int(n/2)))
-        observables_1 = [term("Z",np.hstack([vec,triv[0]])) for vec in kernels]
-        observables_2 = [term("Z",np.hstack([triv[0],vec])) for vec in kernels]
+        shift = int(n/2)
 
-        return " ".join(ob for ob in observables_1+observables_2)
+        observables1 = [np.where(kernel == 1)[0].tolist() for kernel in kernels]
+        observables2 = [(shift+np.where(kernel == 1)[0]).tolist() for kernel in kernels]
+
+        return observables1 + observables2
          
-    def generate_noiseless_circuit(self):
-        HX = self.HX
-        HZ = self.HZ
-        n = self.n
-        k = self.k
 
-        L = []
-        Z_checks = " ".join(term("Z",vec) for vec in HZ)
-        X_checks = " ".join(term("X",vec) for vec in HX)
+    def generate_noisy_circuit(self, code_capacity = False):
+        """
+        Generates BB circuit under given code parameters.
 
-        nchecks = n+k
+        Parameters:
+        code_capacity(bool) : If True, use code capacity conditions. Else use circuit level noise.
 
-
-        observables = self.get_logical_observables()
-
-        L.append("MPP "+Z_checks+" "+X_checks+" "+observables)
-        L.append("TICK")
-        L.append("MPP "+Z_checks+" "+X_checks+" "+observables)
-        for i in range(n):
-             L.append(f"DETECTOR rec[{-2*nchecks+i}] rec[{-nchecks+i}]")
-
-        for j in range(k):
-             L.append(f"OBSERVABLE_INCLUDE({j}) rec[{-2*nchecks + n + j}] rec[{-nchecks+ n + j}]")
-
-        return stim.Circuit("\n".join(L))
-
-    def generate_noisy_circuit(self):
+        Returns:
+        circuit(stim.circuit) : BB circuit.
+        """
         n = self.n
         k = self.k
         rounds = self.rounds
-        p = self.p
+        p_measure = self.p
+        p_idle = self.p
+
+        if code_capacity:
+            p_measure = 0
 
         HX = self.HX
         HZ = self.HZ
@@ -187,67 +236,70 @@ class BivBic:
         R_B3_X = create_CNOT_string("R", X_ancillas, B3)
         
         #----------Defining circuit for a single round of syndrome measurement----------------------------------
-        def _create_round_circuit(prob = p, detectors = False):
+        def _create_round_circuit(p_m, p_i, detectors = False):
             round_circuit = stim.Circuit()
             
             #Step 1-------
 
-            round_circuit.append("R",X_ancillas,p)
+            round_circuit.append("R",X_ancillas)
+            round_circuit.append("X_ERROR",X_ancillas,p_m)
             round_circuit.append("CX", R_A1_Z)
-            round_circuit.append("DEPOLARIZING2", R_A1_Z, prob)
+            round_circuit.append("DEPOLARIZE2", R_A1_Z, p_m)
 
             #Step 2-------
 
             round_circuit.append("CX",L_A2_X)
-            round_circuit.append("DEPOLARIZING2", L_A2_X, prob)
+            round_circuit.append("DEPOLARIZE2", L_A2_X, p_m)
             round_circuit.append("CX", R_A3_Z)
-            round_circuit.append("DEPOLARIZING2", R_A3_Z, prob)
+            round_circuit.append("DEPOLARIZE2", R_A3_Z, p_m)
 
             #Step 3--------
 
             round_circuit.append("CX",R_B2_X)
-            round_circuit.append("DEPOLARIZING2", R_B2_X, prob)
+            round_circuit.append("DEPOLARIZE2", R_B2_X, p_m)
             round_circuit.append("CX", L_B1_Z)
-            round_circuit.append("DEPOLARIZING2", L_B1_Z, prob)
+            round_circuit.append("DEPOLARIZE2", L_B1_Z, p_m)
 
             #Step 4--------
 
             round_circuit.append("CX",R_B1_X)
-            round_circuit.append("DEPOLARIZING2", R_B1_X, prob)
+            round_circuit.append("DEPOLARIZE2", R_B1_X, p_m)
             round_circuit.append("CX", L_B2_Z)
-            round_circuit.append("DEPOLARIZING2", L_B2_Z, prob)
+            round_circuit.append("DEPOLARIZE2", L_B2_Z, p_m)
 
             #Step 5--------
 
             round_circuit.append("CX",R_B3_X)
-            round_circuit.append("DEPOLARIZING2", R_B3_X, prob)
+            round_circuit.append("DEPOLARIZE2", R_B3_X, p_m)
             round_circuit.append("CX", L_B3_Z)
-            round_circuit.append("DEPOLARIZING2", L_B3_Z, prob)
+            round_circuit.append("DEPOLARIZE2", L_B3_Z, p_m)
 
             #Step 6--------
 
             round_circuit.append("CX",L_A1_X)
-            round_circuit.append("DEPOLARIZING2", L_A1_X, prob)
+            round_circuit.append("DEPOLARIZE2", L_A1_X, p_m)
             round_circuit.append("CX", R_A2_Z)
-            round_circuit.append("DEPOLARIZING2", R_A2_Z, prob)
+            round_circuit.append("DEPOLARIZE2", R_A2_Z, p_m)
 
             #Step 7--------
 
             round_circuit.append("CX",L_A3_X)
-            round_circuit.append("DEPOLARIZING2", L_A3_X, prob)
-            round_circuit.append("M", Z_ancillas, prob)
-            round_circuit.append("DEPOLARIZING1", R_qubits, prob)
+            round_circuit.append("DEPOLARIZE2", L_A3_X, p_m)
+            round_circuit.append("M", Z_ancillas, p_m)
+            round_circuit.append("DEPOLARIZE1", R_qubits, p_i)
 
             #Step 8--------
 
-            round_circuit.append("M", X_ancillas, prob)
-            round_circuit.append("R",Z_ancillas,prob)
-            round_circuit.append("DEPOLARIZING1", L_qubits, prob)
-            round_circuit.append("DEPOLARIZING1", R_qubits, prob)
+            round_circuit.append("M", X_ancillas, p_m)
+            round_circuit.append("R",Z_ancillas)
+            round_circuit.append("X_ERROR",Z_ancillas,p_m)
+            round_circuit.append("DEPOLARIZE1", L_qubits, p_i)
+            round_circuit.append("DEPOLARIZE1", R_qubits, p_i)
 
             if detectors:
-                 round_circuit.append("DETECTOR", [stim.target_rec(-1), stim.target_rec(-3)])
-                 round_circuit.append("DETECTOR", [stim.target_rec(-2), stim.target_rec(-4)])
+                for i in range(n):
+                     #First n/2 detectors are for Z-checks and next n/2 detectors are for X-checks
+                     round_circuit.append("DETECTOR", [stim.target_rec(-2*n + i), stim.target_rec(-n+i)])
 
             round_circuit.append("TICK")
 
@@ -256,13 +308,41 @@ class BivBic:
         #-----------Initializing circuit with perfect measurements. No detectors at this stage------------------
 
         circuit = stim.Circuit()
-        circuit += _create_round_circuit(0,False)
+        circuit += _create_round_circuit(0,0,False)
 
         #--------Now implementing rounds of faulty syndrome measurement-----------------------------------------
 
-        circuit += _create_round_circuit(p,True) * rounds
+        circuit += _create_round_circuit(p_measure,p_idle,True) * rounds
 
-        
+        #--------Final measurement readout----------------------------------------------------------------------
+
+        circuit.append("M", data_qubits)
+
+        #--------Final Z-check detectors must be calculated directly from data qubits---------------------------
+
+        Z_checks = {
+            Z_ancillas[i] : np.where(HZ[i,:] == 1)[0].tolist() for i in range(int(n/2))
+        }
+
+        for i,ancilla in enumerate(Z_ancillas):
+            support = Z_checks[ancilla]
+            targets = [stim.target_rec(-n + supp) for supp in support]
+            targets.append(stim.target_rec(-2*n + i))
+
+            circuit.append("DETECTOR", targets)
+
+        #------Defining logical observables -------------------------------------------------------------------
+
+        for i, observable in enumerate(observables):
+            targets = [stim.target_rec(-n+supp) for supp in observable] 
+
+            circuit.append("OBSERVABLE_INCLUDE",targets,i)
+
+
+        return circuit           
+
+
+
 
 
 

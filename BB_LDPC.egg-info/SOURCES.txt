@@ -1,8 +1,0 @@
-LICENSE
-pyproject.toml
-BB_LDPC.egg-info/PKG-INFO
-BB_LDPC.egg-info/SOURCES.txt
-BB_LDPC.egg-info/dependency_links.txt
-BB_LDPC.egg-info/requires.txt
-BB_LDPC.egg-info/top_level.txt
-src/generate_BBcode.py

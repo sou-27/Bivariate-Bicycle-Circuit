@@ -12,7 +12,8 @@ dependencies = [
     "ncon",
     "scipy",
     "galois",
-    "ldpc"
+    "sinter",
+    "stimbposd"
 ]
 
 

@@ -7,3 +7,9 @@ venv/
 .vscode/
 .idea/
 .DS_Store
+*.egg-info/
+.eggs/
+build/
+dist/
+__pycache__/
+*.pyc
